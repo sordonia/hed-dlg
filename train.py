@@ -232,10 +232,11 @@ def main(args):
                     
                     valid_cost += c
                     valid_done += batch['num_preds']
+                
                 logger.debug("[VALIDATION END]") 
                  
                 valid_cost /= valid_done 
-                if len(timings["valid"]) == 0 or valid_cost < timings["valid"][-1]:
+                if len(timings["valid"]) == 0 or valid_cost < numpy.min(timings["valid"]):
                     patience = state['patience']
                     # Saving model if decrease in validation cost
                     save(model, timings)
