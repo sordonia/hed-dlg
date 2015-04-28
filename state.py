@@ -76,6 +76,15 @@ def prototype_state():
     state['time_stop'] = 24*60*31
     # Error level to stop at
     state['minerr'] = -1
+
+    # ----- EVALUATION PROCESS -----
+    state['track_extrema_validation_samples'] = True # If set to true will print the extrema (lowest and highest log-likelihood scoring) validation samples
+    state['track_extrema_samples_count'] = 100 # Set of extrema samples to track
+    state['print_extrema_samples_count'] = 5 # Number of extrema samples to print (chosen at random from the extrema sets)
+
+    state['compute_mutual_information'] = True # If true, the empirical mutural information will be calculcated on the validation set
+
+
     return state
 
 def prototype_test():
@@ -91,9 +100,11 @@ def prototype_test():
     # Handle bleu evaluation
     state['bleu_evaluation'] = "./tests/bleu/bleu_evaluation"
     state['bleu_context_length'] = 2
+
+
     
     # Validation frequency
-    state['valid_freq'] = 500
+    state['valid_freq'] = 50
     
     # Varia
     state['prefix'] = "testmodel_" 
@@ -105,13 +116,52 @@ def prototype_test():
     # If out of memory, modify this!
     state['bs'] = 80
     state['use_nce'] = True
-    state['decoder_bias_type'] = 'selective' 
+    state['decoder_bias_type'] = 'all' #'selective' 
     
     state['qdim'] = 50 
     # Dimensionality of triple hidden layer 
     state['sdim'] = 100
     # Dimensionality of low-rank approximation
     state['rankdim'] = 25
+    return state
+
+def prototype_moviedic():
+    state = prototype_state()
+    
+    # Fill your paths here! 
+    state['train_triples'] = "Data/Training.triples.pkl"
+    state['test_triples'] = "Data/Test.triples.pkl"
+    state['valid_triples'] = "Data/Validation.triples.pkl"
+    state['dictionary'] = "Data/Training.dict.pkl" 
+    state['save_dir'] = "Output" 
+    
+    # Handle bleu evaluation
+    state['bleu_evaluation'] = "Data/Validation_Shuffled_Dataset.txt"
+    state['bleu_context_length'] = 2
+    
+    # Validation frequency
+    state['valid_freq'] = 5000
+    
+    # Varia
+    state['prefix'] = "MovieScriptModel_" 
+    state['updater'] = 'adam'
+    
+    state['maxout_out'] = True
+    state['deep_out'] = True
+     
+    # If out of memory, modify this!
+    state['bs'] = 80
+    state['use_nce'] = False
+    state['decoder_bias_type'] = 'all' # Choose between 'first', 'all' and 'selective' 
+
+    # Increase sequence length to fit movie dialogues better
+    state['seqlen'] = 160
+
+    state['qdim'] = 600
+    # Dimensionality of triple hidden layer 
+    state['sdim'] = 300
+    # Dimensionality of low-rank approximation
+    state['rankdim'] = 300
     return state
 
 

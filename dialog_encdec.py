@@ -409,8 +409,9 @@ class Decoder(EncoderDecoderBase):
         # EVALUATION  : Return target_probs + all the predicted ranks
         # target_probs.ndim == 3
         if mode == Decoder.EVALUATION:
-            target_probs = GrabProbs(self.output_softmax(pre_activ), y)
-            return target_probs, hd, _res 
+            outputs = self.output_softmax(pre_activ)
+            target_probs = GrabProbs(outputs, y)
+            return target_probs, hd, _res, outputs 
         elif mode == Decoder.NCE:
             return self.output_nce(pre_activ, y, y_neg), hd
         # BEAM_SEARCH : Return output (the softmax layer) + the new hidden states
@@ -649,8 +650,17 @@ class DialogEncoderDecoder(Model):
             # Compile functions
             logger.debug("Building evaluation function")
             self.eval_fn = theano.function(inputs=[self.x_data, self.x_max_length, self.x_cost_mask], 
-                                            outputs=self.softmax_cost, name="eval_fn")
+                                            outputs=[self.softmax_cost_acc, self.softmax_cost], name="eval_fn")
         return self.eval_fn
+
+    def build_eval_misclassification_function(self):
+        if not hasattr(self, 'eval_misclass_fn'):
+            # Compile functions
+            logger.debug("Building misclassification evaluation function")
+            self.eval_misclass_fn = theano.function(inputs=[self.x_data, self.x_max_length, self.x_cost_mask], 
+                                            outputs=self.training_misclassification, name="eval_misclass_fn", on_unused_input='ignore')
+
+        return self.eval_misclass_fn
 
     def build_get_states_function(self):
         if not hasattr(self, 'get_states_fn'):
@@ -704,8 +714,12 @@ class DialogEncoderDecoder(Model):
         
         self.t_noise_probs = theano.shared(self.noise_probs.astype('float32'), 't_noise_probs')
         # Dictionaries to convert str to idx and vice-versa
-        self.str_to_idx = dict([(tok, tok_id) for tok, tok_id, _ in raw_dict])
-        self.idx_to_str = dict([(tok_id, tok) for tok, tok_id, freq in raw_dict])
+        self.str_to_idx = dict([(tok, tok_id) for tok, tok_id, _, _ in raw_dict])
+        self.idx_to_str = dict([(tok_id, tok) for tok, tok_id, freq, _ in raw_dict])
+
+        # Extract document (triple) frequency for each word
+        self.word_freq = dict([(tok_id, freq) for _, tok_id, freq, _ in raw_dict])
+        self.document_freq = dict([(tok_id, df) for _, tok_id, _, df in raw_dict])
 
         if '</s>' not in self.str_to_idx \
            or '<s>' not in self.str_to_idx:
@@ -714,7 +728,8 @@ class DialogEncoderDecoder(Model):
         # Number of words in the dictionary 
         self.idim = len(self.str_to_idx)
         self.state['idim'] = self.idim
- 
+        logger.debug("idim: " + str(self.idim))
+
         logger.debug("Initializing encoder")
         self.encoder = Encoder(self.state, self.rng, self)
         logger.debug("Initializing decoder")
@@ -745,22 +760,28 @@ class DialogEncoderDecoder(Model):
 
         logger.debug("Build encoder")
         self.h, self.hs = self.encoder.build_encoder(training_x, xmask=training_hs_mask)
-        
+        #target_probs, target_probs_full_matrix = self.decoder.build_decoder(hs, training_x, xmask=training_hs_mask, y=training_y, mode=Decoder.EVALUATION)
+
         logger.debug("Build decoder (NCE)")
         contrastive_cost, self.hd_nce = self.decoder.build_decoder(self.hs, training_x, y_neg=self.y_neg, y=training_y, xmask=training_hs_mask, mode=Decoder.NCE)
         
         logger.debug("Build decoder (EVAL)")
-        target_probs, self.hd, self.decoder_states = self.decoder.build_decoder(self.hs, training_x, xmask=training_hs_mask, y=training_y, mode=Decoder.EVALUATION)
+        target_probs, self.hd, self.decoder_states, target_probs_full_matrix = self.decoder.build_decoder(self.hs, training_x, xmask=training_hs_mask, y=training_y, mode=Decoder.EVALUATION)
+
          
         # Prediction cost and rank cost
         self.contrastive_cost = T.sum(contrastive_cost.flatten() * training_x_cost_mask)
-        self.softmax_cost = T.sum(-T.log(target_probs) * training_x_cost_mask)
-        
+        self.softmax_cost = -T.log(target_probs) * training_x_cost_mask
+        self.softmax_cost_acc = T.sum(self.softmax_cost)
+
         # Mean squared error
-        self.training_cost = self.softmax_cost
+        self.training_cost = self.softmax_cost_acc
         if self.use_nce:
             self.training_cost = self.contrastive_cost
         self.updates = self.compute_updates(self.training_cost / training_x.shape[1], self.params)
+
+        # Prediction accuracy
+        self.training_misclassification = T.sum(T.neq(T.argmax(target_probs_full_matrix, axis=2), training_y).flatten() * training_x_cost_mask)
 
         # Sampling variables
         self.n_samples = T.iscalar("n_samples")
