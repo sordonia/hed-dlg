@@ -493,7 +493,7 @@ class Decoder(EncoderDecoderBase):
         if m_t.ndim >= 1:
             m_t = m_t.dimshuffle(0, 'x')
          
-        hd_tm1 = (m_t) * hd_tm1 + (1 - m_t) * T.tanh(T.dot(hs_t, self.Wd_s_0) + self.bd_s_0) 
+        hd_tm1 = (m_t) * hd_tm1 + (1 - m_t) * self.sent_rec_activation(T.dot(hs_t, self.Wd_s_0) + self.bd_s_0) 
         # ^ iff x_{t - 1} = </s> (m_t = 0) then x_{t - 1} = 0
         # and hd_{t - 1} = tanh(W_s_0 hs_t + bd_s_0) else hd_{t - 1} is left unchanged (m_t = 1)
   
@@ -542,7 +542,7 @@ class Decoder(EncoderDecoderBase):
             m_t = m_t.dimshuffle(0, 'x')
         
         # We already assume that xd are zeroed out
-        hd_tm1 = (m_t) * hd_tm1 + (1-m_t) * T.tanh(T.dot(hs_t, self.Wd_s_0) + self.bd_s_0)
+        hd_tm1 = (m_t) * hd_tm1 + (1-m_t) * self.sent_rec_activation(T.dot(hs_t, self.Wd_s_0) + self.bd_s_0)
         # ^ iff x_{t - 1} = </s> (m_t = 0) then x_{t-1} = 0
         # and hd_{t - 1} = 0 else hd_{t - 1} is left unchanged (m_t = 1)
 
