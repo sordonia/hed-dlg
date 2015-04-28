@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python
 
 from data_iterator import *
@@ -18,6 +19,13 @@ import pprint
 import numpy
 import collections
 import signal
+import math
+
+
+import matplotlib
+matplotlib.use('Agg')
+import pylab
+
 
 class Unbuffered:
     def __init__(self, stream):
@@ -37,7 +45,7 @@ logger = logging.getLogger(__name__)
 RUN_ID = str(time.time())
 
 ### Additional measures can be set here
-measures = ["train", "valid", "bleu"]
+measures = ["train_cost", "train_misclass", "valid_cost", "valid_misclass", "valid_emi", "valid_bleu", 'valid_jaccard', 'valid_recall_at_1', 'valid_recall_at_5', 'valid_mrr_at_5', 'tfidf_cs_at_1', 'tfidf_cs_at_5']
 
 def init_timings():
     timings = {}
@@ -113,12 +121,35 @@ def main(args):
     else:
         # assign new run_id key
         model.state['run_id'] = RUN_ID
+
+    logger.debug("Compile trainer")
+    if not state["use_nce"]:
+        train_batch = model.build_train_function()
+    else:
+        train_batch = model.build_nce_function()
+
+    eval_batch = model.build_eval_function()
+    eval_misclass_batch = model.build_eval_misclassification_function()
+    sample = model.build_sampling_function()
+
+    logger.debug("Load data")
+    train_data, \
+    valid_data, \
+    test_data = get_batch_iterator(rng, state)
+    
+    train_data.start()
     
     # Build the data structures for Bleu evaluation
     if 'bleu_evaluation' in state:
         beam_sampler = search.Sampler(model)
         bleu_eval = BleuEvaluator()
-        
+        jaccard_eval = JaccardEvaluator()
+        recall_at_1_eval = RecallEvaluator(n=1)
+        recall_at_5_eval = RecallEvaluator(n=5)
+        mrr_at_5_eval = MRREvaluator(n=5)
+        tfidf_cs_at_1_eval = TFIDF_CS_Evaluator(model, train_data.data_len, 1)
+        tfidf_cs_at_5_eval = TFIDF_CS_Evaluator(model, train_data.data_len, 5)
+
         samples = open(state['bleu_evaluation'], 'r').readlines() 
         n = state['bleu_context_length']
         
@@ -130,28 +161,13 @@ def main(args):
             contexts.append(sentences[:n])
             targets.append(sentences[n:])
 
-    logger.debug("Compile trainer")
-    if not state["use_nce"]:
-        train_batch = model.build_train_function()
-    else:
-        train_batch = model.build_nce_function()
-
-    eval_batch = model.build_eval_function()
-    sample = model.build_sampling_function()
-
-    logger.debug("Load data")
-    train_data, \
-    valid_data, \
-    test_data = get_batch_iterator(rng, state)
-    
-    train_data.start()
-
     # Start looping through the dataset
     step = 0
     patience = state['patience'] 
     start_time = time.time()
      
     train_cost = 0
+    train_misclass = 0
     train_done = 0
     ex_done = 0
      
@@ -193,25 +209,59 @@ def main(args):
             continue
 
         train_cost += c
+
+        # Compute word-error rate
+        miscl = eval_misclass_batch(x_data, max_length, x_cost_mask)
+        if numpy.isinf(c) or numpy.isnan(c):
+            logger.warn("Got NaN misclassification .. skipping")
+            continue
+
+        train_misclass += miscl
+
         train_done += batch['num_preds']
 
         this_time = time.time()
         if step % state['train_freq'] == 0:
             elapsed = this_time - start_time
             h, m, s = ConvertTimedelta(this_time - start_time)
-            print ".. %.2d:%.2d:%.2d %4d mb # %d bs %d maxl %d acc_cost = %.4f" % (h, m, s,\
-                                                                             state['time_stop'] - (time.time() - start_time)/60.,\
-                                                                             step, \
-                                                                             batch['x'].shape[1], \
-                                                                             batch['max_length'], \
-                                                                             float(train_cost/train_done))        
+            print ".. %.2d:%.2d:%.2d %4d mb # %d bs %d maxl %d acc_cost = %.4f acc_word_perplexity = %.4f acc_mean_word_error = %.4f " % (h, m, s,\
+                                                                 state['time_stop'] - (time.time() - start_time)/60.,\
+                                                                 step, \
+                                                                 batch['x'].shape[1], \
+                                                                 batch['max_length'], \
+                                                                 float(train_cost/train_done), \
+                                                                 math.exp(float(train_cost/train_done)), \
+                                                                 float(train_misclass)/float(train_done))
+
+
+
+
         if valid_data is not None and\
             step % state['valid_freq'] == 0 and step > 1:
-                 
                 valid_data.start()
                 valid_cost = 0
-                valid_done = 0
-                 
+                valid_misclass = 0
+                valid_empirical_mutual_information = 0
+                valid_wordpreds_done = 0
+                valid_triples_done = 0
+
+
+                # Prepare variables for plotting histogram over word-perplexities and mutual information
+                valid_data_len = valid_data.data_len
+                valid_cost_list = numpy.zeros((valid_data_len,))
+                valid_pmi_list = numpy.zeros((valid_data_len,))
+
+
+                # Prepare variables for printing the training examples the model performs best and worst on
+                valid_extrema_setsize = min(state['track_extrema_samples_count'], valid_data_len)
+                valid_extrema_samples_to_print = min(state['print_extrema_samples_count'], valid_extrema_setsize)
+
+                valid_lowest_costs = numpy.ones((valid_extrema_setsize,))*1000
+                valid_lowest_triples = numpy.ones((valid_extrema_setsize,state['seqlen']))*1000
+                valid_highest_costs = numpy.ones((valid_extrema_setsize,))*(-1000)
+                valid_highest_triples = numpy.ones((valid_extrema_setsize,state['seqlen']))*(-1000)
+
+
                 logger.debug("[VALIDATION START]") 
                 
                 while True:
@@ -225,44 +275,189 @@ def main(args):
                     x_data = batch['x']
                     max_length = batch['max_length']
                     x_cost_mask = batch['x_mask']
+                    
 
-                    c = eval_batch(x_data, max_length, x_cost_mask)
+                    c, c_list = eval_batch(x_data, max_length, x_cost_mask)
+                    c_list = c_list.reshape((batch['x'].shape[1],max_length), order=(1,0))
+                    c_list = numpy.sum(c_list, axis=1)
+                    
+                    words_in_triples = numpy.sum(x_cost_mask, axis=0)
+                    c_list = c_list / words_in_triples
+                    
                     if numpy.isinf(c) or numpy.isnan(c):
                         continue
                     
                     valid_cost += c
-                    valid_done += batch['num_preds']
-                
+                    nxt =  min((valid_triples_done+batch['x'].shape[1]), valid_data_len)
+                    triples_in_batch = nxt-valid_triples_done
+                    valid_cost_list[(nxt-triples_in_batch):nxt] = numpy.exp(c_list[0:triples_in_batch])
+
+                    # Store best and worst validation costs                    
+                    con_costs = np.concatenate([valid_lowest_costs, c_list[0:triples_in_batch]])
+                    con_triples = np.concatenate([valid_lowest_triples, x_data[:, 0:triples_in_batch].T], axis=0)
+                    con_indices = con_costs.argsort()[0:valid_extrema_setsize][::1]
+                    valid_lowest_costs = con_costs[con_indices]
+                    valid_lowest_triples = con_triples[con_indices]
+
+                    con_costs = np.concatenate([valid_highest_costs, c_list[0:triples_in_batch]])
+                    con_triples = np.concatenate([valid_highest_triples, x_data[:, 0:triples_in_batch].T], axis=0)
+                    con_indices = con_costs.argsort()[-valid_extrema_setsize:][::-1]
+                    valid_highest_costs = con_costs[con_indices]
+                    valid_highest_triples = con_triples[con_indices]
+
+
+                    # Compute word-error rate
+                    miscl = eval_misclass_batch(x_data, max_length, x_cost_mask)
+                    if numpy.isinf(c) or numpy.isnan(c):
+                        continue
+
+                    valid_misclass += miscl
+
+                    # Compute empirical mutual information
+                    if state['compute_mutual_information'] == True:
+                        # Compute marginal log-likelihood of last utterance in triple:
+                        # We approximate it with the margina log-probabiltiy of the utterance being observed first in the triple
+                        x_data_last_utterance = batch['x_last_utterance']
+                        x_cost_mask_last_utterance = batch['x_mask_last_utterance']
+                        marginal_last_utterance_loglikelihood, marginal_last_utterance_loglikelihood_list = eval_batch(x_data_last_utterance, max_length, x_cost_mask_last_utterance)
+                        marginal_last_utterance_loglikelihood_list = marginal_last_utterance_loglikelihood_list.reshape((batch['x'].shape[1],max_length), order=(1,0))
+                        marginal_last_utterance_loglikelihood_list = numpy.sum(marginal_last_utterance_loglikelihood_list, axis=1)
+                        # If we wanted to normalize histogram plots by utterance length, we should enable this:
+                        #words_in_last_utterance = numpy.sum(x_cost_mask_last_utterance, axis=0)
+                        #marginal_last_utterance_loglikelihood_list = marginal_last_utterance_loglikelihood_list / words_in_last_utterance
+
+                        # Compute marginal log-likelihood of first utterances in triple by masking the last utterance
+                        x_cost_mask_first_utterances = x_cost_mask - x_cost_mask_last_utterance
+                        marginal_first_utterances_loglikelihood, marginal_first_utterances_loglikelihood_list = eval_batch(x_data, max_length, x_cost_mask_first_utterances)
+
+                        marginal_first_utterances_loglikelihood_list = marginal_first_utterances_loglikelihood_list.reshape((batch['x'].shape[1],max_length), order=(1,0))
+                        marginal_first_utterances_loglikelihood_list = numpy.sum(marginal_first_utterances_loglikelihood_list, axis=1)
+
+                        # If we wanted to normalize histogram plots by utterance length, we should enable this:
+                        #words_in_first_utterances = numpy.sum(x_cost_mask_first_utterances, axis=0)
+                        #marginal_first_utterances_loglikelihood_list = marginal_first_utterances_loglikelihood_list / words_in_first_utterances
+
+
+                        # Compute empirical mutual information and pointwise empirical mutual information
+                        valid_empirical_mutual_information += -c + marginal_first_utterances_loglikelihood + marginal_last_utterance_loglikelihood
+                        valid_pmi_list[(nxt-triples_in_batch):nxt] = (-c_list*words_in_triples + marginal_first_utterances_loglikelihood_list + marginal_last_utterance_loglikelihood_list)[0:triples_in_batch]
+
+                    valid_wordpreds_done += batch['num_preds']
+                    valid_triples_done += batch['x'].shape[1]
+
+
                 logger.debug("[VALIDATION END]") 
                  
-                valid_cost /= valid_done 
-                if len(timings["valid"]) == 0 or valid_cost < numpy.min(timings["valid"]):
+                valid_cost /= valid_wordpreds_done
+                valid_misclass /= float(valid_wordpreds_done)
+                valid_empirical_mutual_information /= float(valid_triples_done)
+
+
+                if len(timings["valid_cost"]) == 0 or valid_cost < timings["valid_cost"][-1]:
                     patience = state['patience']
                     # Saving model if decrease in validation cost
                     save(model, timings)
-                elif valid_cost >= timings["valid"][-1] * state['cost_threshold']:
+                elif valid_cost >= timings["valid_cost"][-1] * state['cost_threshold']:
                     patience -= 1
 
-                print "** validation error = %.4f, patience = %d" % (float(valid_cost), patience)
-                
-                timings["train"].append(train_cost/train_done)
-                timings["valid"].append(valid_cost)
+                print "** valid cost = %.4f, valid word-perplexity = %.4f, valid mean word-error = %.4f, valid emp. mutual information = %.4f, patience = %d" % (float(valid_cost), float(math.exp(valid_cost)), float(valid_misclass), valid_empirical_mutual_information, patience)
 
-                # Reset train cost and train done
+                timings["train_cost"].append(train_cost/train_done)
+                timings["train_misclass"].append(float(train_misclass)/float(train_done))
+                timings["valid_cost"].append(valid_cost)
+                timings["valid_misclass"].append(valid_misclass)
+                timings["valid_emi"].append(valid_empirical_mutual_information)
+
+
+                # Reset train cost, train misclass and train done
                 train_cost = 0
+                train_misclass = 0
                 train_done = 0
-       
+
+                # Plot histogram over validation costs
+                try:
+                    pylab.figure()
+                    bins = range(0, 50, 1)
+                    pylab.hist(valid_cost_list, normed=1, histtype='bar')
+                    pylab.savefig(model.state['save_dir'] + '/' + model.state['run_id'] + "_" + model.state['prefix'] + 'Valid_WordPerplexities_'+ str(step) + '.png')
+                except:
+                    pass
+
+
+                # Print 5 of 10% validation samples with highest log-likelihood
+                if state['track_extrema_validation_samples']==True:
+                    print " highest word log-likelihood valid samples: " 
+                    np.random.shuffle(valid_lowest_triples)
+                    for i in range(valid_extrema_samples_to_print):
+                        print "      Sample: {}".format(" ".join(model.indices_to_words(numpy.ravel(valid_lowest_triples[i,:]))))
+
+                    print " lowest word log-likelihood valid samples: " 
+                    np.random.shuffle(valid_highest_triples)
+                    for i in range(valid_extrema_samples_to_print):
+                        print "      Sample: {}".format(" ".join(model.indices_to_words(numpy.ravel(valid_highest_triples[i,:]))))
+
+                # Plot histogram over empirical pointwise mutual informations
+                if state['compute_mutual_information'] == True:
+                    try:
+                        pylab.figure()
+                        bins = range(0, 100, 1)
+                        pylab.hist(valid_pmi_list, normed=1, histtype='bar')
+                        pylab.savefig(model.state['save_dir'] + '/' + model.state['run_id'] + "_" + model.state['prefix'] + 'Valid_PMI_'+ str(step) + '.png')
+                    except:
+                        pass
+
+
+
         if 'bleu_evaluation' in state and \
-            step % state['valid_freq'] == 0 and step > 1:
+            step % state['valid_freq'] == 0 and step > 1:
+
+            # Compute samples with beam search
+            logger.debug("Executing beam search to get targets for bleu, jaccard etc.")
+            samples, costs = beam_sampler.sample(contexts, n_samples=5, ignore_unk=True)
+            logger.debug("Finished beam search.")
+
+            assert len(samples) == len(contexts)
+            #print 'samples', samples
              
             # Bleu evaluation
-            samples, costs = beam_sampler.sample(contexts, n_samples=1, ignore_unk=True)
-            assert len(samples) == len(contexts)
-             
             bleu = bleu_eval.evaluate(samples, targets)
              
             print "** bleu score = %.4f " % bleu[0] 
-            timings["bleu"].append(bleu[0])
+            timings["valid_bleu"].append(bleu[0])
+
+            # Jaccard evaluation
+            jaccard = jaccard_eval.evaluate(samples, targets)
+
+            print "** jaccard score = %.4f " % jaccard
+            timings["valid_jaccard"].append(jaccard)
+
+            # Recall evaluation
+            recall_at_1 = recall_at_1_eval.evaluate(samples, targets)
+
+            print "** recall@1 score = %.4f " % recall_at_1
+            timings["valid_recall_at_1"].append(recall_at_1)
+
+            recall_at_5 = recall_at_5_eval.evaluate(samples, targets)
+
+            print "** recall@5 score = %.4f " % recall_at_5
+            timings["valid_recall_at_5"].append(recall_at_5)
+
+            mrr_at_5 = mrr_at_5_eval.evaluate(samples, targets)
+
+            # MRR evaluation (equivalent to mean average precision)
+            print "** mrr@5 score = %.4f " % mrr_at_5
+            timings["valid_mrr_at_5"].append(mrr_at_5)
+
+            # TF-IDF cosine similarity evaluation
+            tfidf_cs_at_1 = tfidf_cs_at_1_eval.evaluate(samples, targets)
+
+            print "** tfidf-cs@1 score = %.4f " % tfidf_cs_at_1
+            timings["tfidf_cs_at_1"].append(tfidf_cs_at_1)
+
+            tfidf_cs_at_5 = tfidf_cs_at_5_eval.evaluate(samples, targets)
+
+            print "** tfidf-cs@5 score = %.4f " % tfidf_cs_at_5
+            timings["tfidf_cs_at_5"].append(tfidf_cs_at_5)
 
         step += 1
 
