@@ -294,20 +294,6 @@ class DialogEncoder(EncoderDecoderBase):
         if xmask == None:
             xmask = T.neq(x, self.eos_sym)
         
-        # Here we roll the mask so we avoid the need for separate
-        # hr and h. The trick is simple: if the original mask is
-        # 0 1 1 0 1 1 1 0 0 0 0 0 -- batch is filled with eos_sym
-        # the rolled mask will be
-        # 0 0 1 1 0 1 1 1 0 0 0 0 -- roll to the right
-        # ^ ^
-        # two resets </s> <s>
-        # the first reset will reset h_init = 0
-        # the second will reset </s> and update given x_t = <s>
-        if xmask.ndim == 2:
-            rolled_xmask = T.roll(xmask, 1, axis=0)
-        else:
-            rolled_xmask = T.roll(xmask, 1)
-
         if self.triple_step_type == "gated":
             f_hier = self.gated_triple_step
             o_hier_info = [hs_0, None, None, None]
