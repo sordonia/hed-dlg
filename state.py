@@ -33,6 +33,8 @@ def prototype_state():
 
     state['sent_step_type'] = 'gated'
     state['triple_step_type'] = 'gated' 
+
+    state['bidirectional_utterance_encoder'] = False
     
     # ----- SIZES ----
     # Dimensionality of hidden layers
@@ -49,6 +51,11 @@ def prototype_state():
     # Early stopping configuration
     state['patience'] = 5
     state['cost_threshold'] = 1.003
+
+    # Initialization configuration
+    state['initialize_from_pretrained_word_embeddings'] = False
+    state['pretrained_word_embeddings_file'] = ''
+    state['fix_pretrained_word_embeddings'] = False
      
     # ----- TRAINING METHOD -----
     # Choose optimization algorithm
@@ -101,7 +108,10 @@ def prototype_test():
     state['bleu_evaluation'] = "./tests/bleu/bleu_evaluation"
     state['bleu_context_length'] = 2
 
-
+    # Handle pretrained word embeddings. Using this requires rankdim=10
+    state['initialize_from_pretrained_word_embeddings'] = True
+    state['pretrained_word_embeddings_file'] = './tests/data/MT_WordEmb.pkl' 
+    state['fix_pretrained_word_embeddings'] = True
     
     # Validation frequency
     state['valid_freq'] = 50
@@ -112,9 +122,14 @@ def prototype_test():
     
     state['maxout_out'] = False
     state['deep_out'] = True
+
+    state['sent_step_type'] = 'gated'
+    state['triple_step_type'] = 'gated' 
+    state['bidirectional_utterance_encoder'] = False 
+
      
     # If out of memory, modify this!
-    state['bs'] = 80
+    state['bs'] = 20
     state['use_nce'] = True
     state['decoder_bias_type'] = 'all' #'selective' 
     
@@ -122,7 +137,7 @@ def prototype_test():
     # Dimensionality of triple hidden layer 
     state['sdim'] = 100
     # Dimensionality of low-rank approximation
-    state['rankdim'] = 25
+    state['rankdim'] = 10
     return state
 
 def prototype_moviedic():
@@ -138,9 +153,15 @@ def prototype_moviedic():
     # Handle bleu evaluation
     state['bleu_evaluation'] = "Data/Validation_Shuffled_Dataset.txt"
     state['bleu_context_length'] = 2
+
+    # Handle pretrained word embeddings. Using this requires rankdim=15
+    state['initialize_from_pretrained_word_embeddings'] = True
+    state['pretrained_word_embeddings_file'] = 'Data/MT_WordEmb.pkl' 
+    state['fix_pretrained_word_embeddings'] = True
+
     
     # Validation frequency
-    state['valid_freq'] = 5000
+    state['valid_freq'] = 2500
     
     # Varia
     state['prefix'] = "MovieScriptModel_" 
@@ -150,7 +171,7 @@ def prototype_moviedic():
     state['deep_out'] = True
      
     # If out of memory, modify this!
-    state['bs'] = 80
+    state['bs'] = 40
     state['use_nce'] = False
     state['decoder_bias_type'] = 'all' # Choose between 'first', 'all' and 'selective' 
 
@@ -159,7 +180,7 @@ def prototype_moviedic():
 
     state['qdim'] = 600
     # Dimensionality of triple hidden layer 
-    state['sdim'] = 300
+    state['sdim'] = 1200
     # Dimensionality of low-rank approximation
     state['rankdim'] = 300
     return state
