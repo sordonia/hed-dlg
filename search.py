@@ -101,11 +101,8 @@ class Sampler(object):
         
         # Convert to matrix, each column is a context 
         # [[1,1,1],[4,4,4],[2,2,2]]
-        #context = numpy.repeat(numpy.array(context, dtype='int32')[:,None], 
-        #                       n_samples, axis=1)
-        
-        context = numpy.array(context, dtype='int32')[:,None]
-
+        context = numpy.repeat(numpy.array(context, dtype='int32')[:,None], 
+                               n_samples, axis=1)
         if context[-1, 0] != self.model.eos_sym:
             raise Exception('Last token of context, when present,'
                             'should be the end of sentence: %d' % self.model.eos_sym)
