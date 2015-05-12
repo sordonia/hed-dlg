@@ -21,11 +21,9 @@ import collections
 import signal
 import math
 
-
 import matplotlib
 matplotlib.use('Agg')
 import pylab
-
 
 class Unbuffered:
     def __init__(self, stream):
@@ -45,7 +43,12 @@ logger = logging.getLogger(__name__)
 RUN_ID = str(time.time())
 
 ### Additional measures can be set here
-measures = ["train_cost", "train_misclass", "valid_cost", "valid_misclass", "valid_emi", "valid_bleu", 'valid_jaccard', 'valid_recall_at_1', 'valid_recall_at_5', 'valid_mrr_at_5', 'tfidf_cs_at_1', 'tfidf_cs_at_5']
+measures = ["train_cost", "train_misclass", 
+            "valid_cost", "valid_misclass", 
+            "valid_emi", "valid_bleu", 
+            "valid_jaccard", "valid_recall_at_1", 
+            "valid_recall_at_5", "valid_mrr_at_5", 
+            "tfidf_cs_at_1", "tfidf_cs_at_5"]
 
 def init_timings():
     timings = {}
@@ -130,7 +133,9 @@ def main(args):
 
     eval_batch = model.build_eval_function()
     eval_misclass_batch = model.build_eval_misclassification_function()
-    sample = model.build_sampling_function()
+
+    random_sampler = search.RandomSampler(model)
+    beam_sampler = search.BeamSampler(model) 
 
     logger.debug("Load data")
     train_data, \
@@ -141,7 +146,6 @@ def main(args):
     
     # Build the data structures for Bleu evaluation
     if 'bleu_evaluation' in state:
-        beam_sampler = search.Sampler(model)
         bleu_eval = BleuEvaluator()
         jaccard_eval = JaccardEvaluator()
         recall_at_1_eval = RecallEvaluator(n=1)
@@ -180,8 +184,8 @@ def main(args):
             for param in model.params:
                 print "%s = %.4f" % (param.name, numpy.sum(param.get_value() ** 2) ** 0.5)
              
-            samples, log_probs = sample(1, state['len_sample'])
-            print "Sampled : {}".format(" ".join(model.indices_to_words(numpy.ravel(samples))))
+            samples, costs = random_sampler.sample([[]], n_samples=1, n_turns=3)
+            print "Sampled : {}".format(samples[0])
          
         # Training phase
         batch = train_data.next() 
@@ -405,8 +409,6 @@ def main(args):
                         pylab.savefig(model.state['save_dir'] + '/' + model.state['run_id'] + "_" + model.state['prefix'] + 'Valid_PMI_'+ str(step) + '.png')
                     except:
                         pass
-
-
 
         if 'bleu_evaluation' in state and \
             step % state['valid_freq'] == 0 and step > 1:

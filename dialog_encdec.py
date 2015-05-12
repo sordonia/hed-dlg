@@ -122,7 +122,7 @@ class Encoder(EncoderDecoderBase):
     def build_encoder(self, x, xmask=None, **kwargs):
         one_step = False
         if len(kwargs):
-            one_step = True
+            raise Exception('One step not supported in build encoder')
          
         # if x.ndim == 2 then 
         # x = (n_steps, batch_size)
@@ -138,14 +138,6 @@ class Encoder(EncoderDecoderBase):
         if not one_step:
             h_0 = T.alloc(np.float32(0), batch_size, self.qdim)
             hs_0 = T.alloc(np.float32(0), batch_size, self.sdim) 
-        # in sampling mode (i.e. one step) we require 
-        else:
-            # in this case x.ndim != 2
-            assert x.ndim != 2
-            assert 'prev_h' in kwargs 
-            assert 'prev_hs' in kwargs
-            h_0 = kwargs['prev_h']
-            hs_0 = kwargs['prev_hs']
 
         xe = self.approx_embedder(x)
         if xmask == None:
@@ -162,8 +154,6 @@ class Encoder(EncoderDecoderBase):
         # the second will reset </s> and update given x_t = <s>
         if xmask.ndim == 2:
             rolled_xmask = T.roll(xmask, 1, axis=0)
-        else:
-            rolled_xmask = T.roll(xmask, 1) 
 
         # Gated Encoder
         if self.sent_step_type == "gated":
@@ -181,25 +171,17 @@ class Encoder(EncoderDecoderBase):
             o_hier_info = [hs_0]
         
         # Run through all the sentence (encode everything)
-        if not one_step: 
-            _res, _ = theano.scan(f_enc,
-                              sequences=[xe, rolled_xmask],\
-                              outputs_info=o_enc_info) 
-        # Make just one step further
-        else:
-            _res = f_enc(xe, rolled_xmask, h_0)
+        _res, _ = theano.scan(f_enc,
+                            sequences=[xe, rolled_xmask],\
+                            outputs_info=o_enc_info) 
         # Get the hidden state sequence
         h = _res[0]
         
         # All hierarchical sentence
         # The hs sequence is based on the original mask
-        if not one_step:
-            _res,  _ = theano.scan(f_hier,\
+        _res,  _ = theano.scan(f_hier,\
                                sequences=[h, xmask],\
                                outputs_info=o_hier_info)
-        # Just one step further
-        else:
-            _res = f_hier(h, xmask, hs_0)
 
         if isinstance(_res, list) or isinstance(_res, tuple):
             hs = _res[0]
@@ -215,8 +197,7 @@ class Encoder(EncoderDecoderBase):
 class Decoder(EncoderDecoderBase):
     NCE = 0
     EVALUATION = 1
-    SAMPLING = 2
-    BEAM_SEARCH = 3
+    BEAM_SEARCH = 2
 
     def __init__(self, state, rng, parent, encoder):
         EncoderDecoderBase.__init__(self, state, rng, parent)
@@ -417,78 +398,7 @@ class Decoder(EncoderDecoderBase):
         # BEAM_SEARCH : Return output (the softmax layer) + the new hidden states
         elif mode == Decoder.BEAM_SEARCH:
             return self.output_softmax(pre_activ), hd
-        # SAMPLING    : Return a vector of n_sample from the output layer 
-        #                 + log probabilities + the new hidden states
-        elif mode == Decoder.SAMPLING:
-            outputs = self.output_softmax(pre_activ)
-            if outputs.ndim == 1:
-                outputs = outputs.dimshuffle('x', 0) 
-            sample = self.trng.multinomial(pvals=outputs, dtype='int64').argmax(axis=-1)
-            if outputs.ndim == 1:
-                sample = sample[0] 
-            log_prob = -T.log(T.diag(outputs.T[sample])) 
-            return sample, log_prob, hd
-    
-    def sampling_step(self, *args): 
-        args = iter(args)
-
-        # Arguments that correspond to scan's "sequences" parameteter:
-        step_num = next(args)
-        assert step_num.ndim == 0
-        
-        # Arguments that correspond to scan's "outputs" parameteter:
-        prev_word = next(args)
-        assert prev_word.ndim == 1
-        
-        # skip the previous word log probability
-        log_prob = next(args)
-        assert log_prob.ndim == 1
-        
-        prev_h = next(args) 
-        assert prev_h.ndim == 2
-        
-        prev_hs = next(args)
-        assert prev_hs.ndim == 2
-        
-        prev_hd = next(args)
-        assert prev_hd.ndim == 2
-       
-        # When we sample we shall recompute the encoder for one step...
-        encoder_args = dict(prev_hs=prev_hs, prev_h=prev_h)
-        h, hs = self.parent.encoder.build_encoder(prev_word, **encoder_args)
-         
-        assert h.ndim == 2
-        assert hs.ndim == 2
-         
-        # ...and decode one step.
-        sample, log_prob, hd = self.build_decoder(hs, prev_word, prev_hd=prev_hd, step_num=step_num, mode=Decoder.SAMPLING)
-        
-        assert sample.ndim == 1
-        assert log_prob.ndim == 1
-        assert hd.ndim == 2
-
-        return [sample, log_prob, h, hs, hd]
-    
-    def build_sampler(self, n_samples, n_steps):
-        # For the naive sampler, the states are:
-        # 1) a vector [</q>] * n_samples to seed the sampling
-        # 2) a vector of [ 0. ] * n_samples for the log_probs
-        # 3) prev_h hidden layers
-        # 4) prev_hs hidden layers
-        # 5) prev_hd hidden layers
-        states = [T.alloc(np.int64(self.eos_sym), n_samples),
-                  T.alloc(np.float32(0.), n_samples),
-                  T.alloc(np.float32(0.), n_samples, self.qdim),
-                  T.alloc(np.float32(0.), n_samples, self.sdim),
-                  T.alloc(np.float32(0.), n_samples, self.qdim)]
-        outputs, updates = theano.scan(self.sampling_step,
-                    outputs_info=states,
-                    sequences=[T.arange(n_steps, dtype='int64')], 
-                    n_steps=n_steps,
-                    name="sampler_scan")
-        # Return sample, log_probs and updates (for tnrg multinomial)
-        return (outputs[0], outputs[1]), updates
-
+     
     def gated_step(self, xd_t, m_t, hs_t, hd_tm1): 
         if m_t.ndim >= 1:
             m_t = m_t.dimshuffle(0, 'x')
@@ -572,18 +482,17 @@ class Decoder(EncoderDecoderBase):
     ####
 
 class DialogEncoderDecoder(Model):
-    def indices_to_words(self, seq, exclude_start_end=True):
+    def indices_to_words(self, seq):
         """
-        Converts a list of words to a list
-        of word ids. Use unk_sym if a word is not
+        Converts a list of word ids to a list
+        of words. Use unk_sym if a word is not
         known.
         """
         def convert():
             for word_index in seq:
                 if word_index > len(self.idx_to_str):
                     raise ValueError('Word index is too large for the model vocabulary!')
-                if not exclude_start_end or (word_index != self.eos_sym and word_index != self.sos_sym):
-                    yield self.idx_to_str[word_index]
+                yield self.idx_to_str[word_index]
         return list(convert())
 
     def words_to_indices(self, seq):
@@ -672,13 +581,6 @@ class DialogEncoderDecoder(Model):
                                             outputs=outputs, name="get_states_fn")
         return self.get_states_fn
 
-    def build_sampling_function(self):
-        if not hasattr(self, 'sample_fn'):
-            logger.debug("Building sampling function")
-            self.sample_fn = theano.function(inputs=[self.n_samples, self.n_steps], outputs=[self.sample, self.sample_log_prob], \
-                                       updates=self.sampling_updates, name="sample_fn")
-        return self.sample_fn
-
     def build_next_probs_function(self):
         if not hasattr(self, 'next_probs_fn'):
             outputs, hd = self.decoder.build_next_probs_predictor(self.beam_hs, self.beam_source, prev_hd=self.beam_hd)
@@ -687,12 +589,21 @@ class DialogEncoderDecoder(Model):
                 name="next_probs_fn")
         return self.next_probs_fn
 
+    def build_next_encoder_function(self):
+        if not hasattr(self, 'next_encoder_fn'):
+            h, hs = self.encoder.build_encoder(self.beam_source, prev_hs=self.beam_hs,
+                                                    prev_h=self.beam_h, prev_token=self.beam_prev_source)
+            self.next_encoder_fn = theano.function(inputs=[self.beam_hs, self.beam_source, self.beam_h, self.beam_prev_source],
+                                                  outputs = [h, hs],
+                                                  name='next_encoder_fn')
+        return self.next_encoder_fn
+
     def build_encoder_function(self):
         if not hasattr(self, 'encoder_fn'):
             h, hs = self.encoder.build_encoder(self.aug_x_data)
             self.encoder_fn = theano.function(inputs=[self.x_data],
                 outputs=[h, hs], name="encoder_fn")
-        return self.encoder_fn
+        return self.encoder_fn 
 
     def __init__(self, state):
         Model.__init__(self)    
@@ -713,13 +624,14 @@ class DialogEncoderDecoder(Model):
         self.noise_probs /= numpy.sum(self.noise_probs)
         
         self.t_noise_probs = theano.shared(self.noise_probs.astype('float32'), 't_noise_probs')
+        
         # Dictionaries to convert str to idx and vice-versa
-        self.str_to_idx = dict([(tok, tok_id) for tok, tok_id, _, _ in raw_dict])
-        self.idx_to_str = dict([(tok_id, tok) for tok, tok_id, freq, _ in raw_dict])
+        self.str_to_idx = dict([(tok, tok_id) for tok, tok_id, _ in raw_dict])
+        self.idx_to_str = dict([(tok_id, tok) for tok, tok_id, freq in raw_dict])
 
         # Extract document (triple) frequency for each word
-        self.word_freq = dict([(tok_id, freq) for _, tok_id, freq, _ in raw_dict])
-        self.document_freq = dict([(tok_id, df) for _, tok_id, _, df in raw_dict])
+        self.word_freq = dict([(tok_id, freq) for _, tok_id, freq in raw_dict])
+        # self.document_freq = dict([(tok_id, df) for _, tok_id, _, df in raw_dict])
 
         if '</s>' not in self.str_to_idx \
            or '<s>' not in self.str_to_idx:
@@ -760,14 +672,15 @@ class DialogEncoderDecoder(Model):
 
         logger.debug("Build encoder")
         self.h, self.hs = self.encoder.build_encoder(training_x, xmask=training_hs_mask)
-        #target_probs, target_probs_full_matrix = self.decoder.build_decoder(hs, training_x, xmask=training_hs_mask, y=training_y, mode=Decoder.EVALUATION)
-
+        
         logger.debug("Build decoder (NCE)")
-        contrastive_cost, self.hd_nce = self.decoder.build_decoder(self.hs, training_x, y_neg=self.y_neg, y=training_y, xmask=training_hs_mask, mode=Decoder.NCE)
+        contrastive_cost, self.hd_nce = self.decoder.build_decoder(
+            self.hs, training_x, y_neg=self.y_neg, y=training_y, xmask=training_hs_mask, mode=Decoder.NCE)
         
         logger.debug("Build decoder (EVAL)")
-        target_probs, self.hd, self.decoder_states, target_probs_full_matrix = self.decoder.build_decoder(self.hs, training_x, xmask=training_hs_mask, y=training_y, mode=Decoder.EVALUATION)
-
+        
+        target_probs, self.hd, self.decoder_states, target_probs_full_matrix = self.decoder.build_decoder(
+            self.hs, training_x, xmask=training_hs_mask, y=training_y, mode=Decoder.EVALUATION)
          
         # Prediction cost and rank cost
         self.contrastive_cost = T.sum(contrastive_cost.flatten() * training_x_cost_mask)
@@ -783,13 +696,11 @@ class DialogEncoderDecoder(Model):
         # Prediction accuracy
         self.training_misclassification = T.sum(T.neq(T.argmax(target_probs_full_matrix, axis=2), training_y).flatten() * training_x_cost_mask)
 
-        # Sampling variables
-        self.n_samples = T.iscalar("n_samples")
-        self.n_steps = T.iscalar("n_steps")
-        (self.sample, self.sample_log_prob), self.sampling_updates = self.decoder.build_sampler(self.n_samples, self.n_steps) 
-
         # Beam-search variables
         self.beam_source = T.lvector("beam_source")
-        self.beam_hs = T.matrix("beam_hs")
-        self.beam_step_num = T.lscalar("beam_step_num")
+        self.beam_prev_source = T.lvector("beam_prev_source") 
+         
+        self.beam_h = T.matrix("beam_h")
+        self.beam_hs = T.matrix("beam_hs") 
         self.beam_hd = T.matrix("beam_hd")
+        self.beam_step_num = T.lscalar("beam_step_num")
