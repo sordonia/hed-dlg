@@ -107,20 +107,14 @@ class Sampler(object):
             raise Exception('Last token of context, when present,'
                             'should be the end of sentence: %d' % self.model.eos_sym)
 
-        prev_hd = numpy.zeros((1, self.model.qdim), dtype='float32')
-        prev_hs = numpy.zeros((1, self.model.sdim), dtype='float32')
+        prev_hd = numpy.zeros((n_samples, self.model.qdim), dtype='float32')
+        prev_hs = numpy.zeros((n_samples, self.model.sdim), dtype='float32')
         
-        # Compute the context encoding and get
-        # the last hierarchical state
-        encoder_states = self.compute_encoding(context)
-        # Last entry of compute encoding is hs (decoder input)
-        prev_hs = encoder_states[-1][-1]
-         
         fin_gen = []
         fin_costs = []
          
-        gen = [[]]
-        costs = [0.]
+        gen = [[] for i in range(n_samples)]
+        costs = [0. for i in range(n_samples)]
         beam_empty = False
 
         for k in range(max_length):
@@ -143,8 +137,8 @@ class Sampler(object):
             indx_update_hs = [num for num, prev_word in enumerate(prev_words)
                                 if prev_word == self.model.eos_sym]
             if len(indx_update_hs):
-                h, hs = self.compute_encoding(context[:, indx_update_hs])
-                prev_hs[indx_update_hs] = hs[-1]
+                encoder_states = self.compute_encoding(context[:, indx_update_hs])
+                prev_hs[indx_update_hs] = encoder_states[-1][-1]
             
             # ... done 
             next_probs, new_hd = self.next_probs_predictor(prev_hs, prev_words, prev_hd)
